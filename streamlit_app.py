@@ -1,84 +1,60 @@
-# streamlit_app.py
-
 import streamlit as st
 import pandas as pd
 import sqlite3
 import joblib
 import json
 import os
+import time
 from datetime import datetime
 
 # ===============================
-# CONFIG & FILE PATHS
+# PAGE CONFIG & PREMIUM STYLING
+# ===============================
+st.set_page_config(
+    page_title="ChurnAI Pro | Strategic Retention",
+    page_icon="📊",
+    layout="wide"
+)
+
+# ===============================
+# RESOURCE LOADER
 # ===============================
 MODEL_FILE = "xgb_churn_model.pkl"
 FEATURES_FILE = "features.json"
-THRESHOLD_FILE = "threshold.json"
 
-st.set_page_config(page_title="Churn AI Strategy Pro", layout="wide")
-
-# ===============================
-# LOAD MODEL & RESOURCES
-# ===============================
 @st.cache_resource
 def load_resources():
     if not os.path.exists(MODEL_FILE):
-        st.error(f"{MODEL_FILE} not found. Train your model first!")
+        st.error("🚨 Model files missing!")
         st.stop()
+    
     model = joblib.load(MODEL_FILE)
-
     with open(FEATURES_FILE, "r") as f:
         features = json.load(f)
-
-    threshold = 0.5
-    if os.path.exists(THRESHOLD_FILE):
-        with open(THRESHOLD_FILE, "r") as f:
-            threshold = json.load(f).get("threshold", 0.5)
-
+    
     import shap
     explainer = shap.TreeExplainer(model)
+    return model, features, explainer
 
-    return model, features, threshold, explainer
-
-model, ALL_FEATURES, OPTIMAL_THRESHOLD, explainer = load_resources()
+model, ALL_FEATURES, explainer = load_resources()
 
 # ===============================
-# DATABASE (SAFE MIGRATION)
+# DATABASE MANAGEMENT
 # ===============================
 def init_db():
     conn = sqlite3.connect("churn_app.db", check_same_thread=False)
     c = conn.cursor()
-
-    # Users table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            password TEXT
-        )
-    """)
-
-    # Predictions table
+    c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT)")
     c.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT,
             churn_probability REAL,
-            risk TEXT,
+            risk_level TEXT,
             created_at DATETIME,
-            total_charges REAL,
-            notes TEXT
+            total_charges REAL
         )
     """)
-
-    # Safe migration: add missing columns if table exists but schema changed
-    c.execute("PRAGMA table_info(predictions)")
-    existing_cols = [row[1] for row in c.fetchall()]
-    if "notes" not in existing_cols:
-        c.execute("ALTER TABLE predictions ADD COLUMN notes TEXT")
-    if "total_charges" not in existing_cols:
-        c.execute("ALTER TABLE predictions ADD COLUMN total_charges REAL")
-
     conn.commit()
     return conn
 
@@ -86,182 +62,187 @@ conn = init_db()
 db_cursor = conn.cursor()
 
 # ===============================
-# AUTHENTICATION
+# AUTHENTICATION SIDEBAR
 # ===============================
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-if not st.session_state.logged_in:
-    st.sidebar.title("Authentication")
-    mode = st.sidebar.radio("Mode", ["Login", "Sign Up"])
-    username = st.sidebar.text_input("Username")
-    password = st.sidebar.text_input("Password", type="password")
-
-    if mode == "Sign Up":
-        if st.sidebar.button("Register"):
-            try:
-                db_cursor.execute(
-                    "INSERT INTO users (username, password) VALUES (?,?)",
-                    (username, password)
-                )
-                conn.commit()
-                st.sidebar.success("Registered! Switch to Login.")
-            except:
-                st.sidebar.error("Username already exists.")
-    else:
-        if st.sidebar.button("Login"):
-            db_cursor.execute(
-                "SELECT * FROM users WHERE username=? AND password=?",
-                (username, password)
-            )
-            if db_cursor.fetchone():
-                st.session_state.logged_in = True
-                st.session_state.username = username
-                st.rerun()
+with st.sidebar:
+    st.title("🛡️ Secure Portal")
+    if not st.session_state.logged_in:
+        mode = st.radio("Access Mode", ["Login", "Sign Up"])
+        user_input = st.text_input("Username")
+        pass_input = st.text_input("Password", type="password")
+        if st.button("Submit"):
+            if mode == "Sign Up":
+                try:
+                    db_cursor.execute("INSERT INTO users (username, password) VALUES (?,?)", (user_input, pass_input))
+                    conn.commit()
+                    st.success("Account Created!")
+                except: st.error("User exists.")
             else:
-                st.sidebar.error("Invalid credentials")
-    st.stop()
+                db_cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (user_input, pass_input))
+                if db_cursor.fetchone():
+                    st.session_state.logged_in = True
+                    st.session_state.username = user_input
+                    st.rerun()
+                else: st.error("Wrong credentials.")
+        st.stop()
+    else:
+        st.success(f"Welcome, {st.session_state.username}")
+        if st.button("Sign Out"):
+            st.session_state.logged_in = False
+            st.rerun()
 
 # ===============================
-# HEADER
+# MAIN DASHBOARD
 # ===============================
-st.sidebar.success(f"Logged in as: {st.session_state.username}")
-if st.sidebar.button("Logout"):
-    st.session_state.logged_in = False
-    st.rerun()
+tab_main, tab_history = st.tabs(["🚀 Risk Predictor", "📜 History & Audit"])
 
-st.title("📊 Telecom Customer Churn – Prescriptive AI")
-st.markdown("---")
+with tab_main:
+    st.title("📊 Customer Retention Intelligence")
+    st.markdown("Assess customer risk using real-time AI modeling.")
 
-# ===============================
-# CUSTOMER INPUT FORM
-# ===============================
-st.subheader("👤 Customer Profile")
+    with st.form("customer_form"):
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            st.subheader("👤 Profile")
+            gender = st.selectbox("Gender", ["Male", "Female"])
+            senior = st.selectbox("Senior Citizen", ["No", "Yes"])
+            partner = st.selectbox("Partner", ["Yes", "No"])
+            dependents = st.selectbox("Dependents", ["Yes", "No"])
+            tenure = st.slider("Tenure (Months)", 0, 72, 12)
 
-col1, col2, col3 = st.columns(3)
+        with c2:
+            st.subheader("🔌 Services")
+            phone = st.selectbox("Phone Service", ["Yes", "No"])
+            multiple = st.selectbox("Multiple Lines", ["Yes", "No", "No phone service"])
+            internet = st.selectbox("Internet Service", ["Fiber optic", "DSL", "No"])
+            security = st.selectbox("Online Security", ["Yes", "No", "No internet service"])
+            backup = st.selectbox("Online Backup", ["Yes", "No", "No internet service"])
+            device = st.selectbox("Device Protection", ["Yes", "No", "No internet service"])
 
-with col1:
-    gender = st.selectbox("Gender", ["Male", "Female"])
-    senior = st.selectbox("Senior Citizen", [0, 1])
-    tenure = st.slider("Tenure (Months)", 0, 72, 12)
-    monthly = st.number_input("Monthly Charges ($)", 0.0, 200.0, 70.0, step=10.0)
-    contract = st.selectbox("Contract Type", ["Month-to-month", "One year", "Two year"])
-    partner = st.selectbox("Partner", ["Yes", "No"])
-    dependents = st.selectbox("Dependents", ["Yes", "No"])
+        with c3:
+            st.subheader("💳 Billing & Contract")
+            tech = st.selectbox("Tech Support", ["Yes", "No", "No internet service"])
+            tv = st.selectbox("Streaming TV", ["Yes", "No", "No internet service"])
+            movies = st.selectbox("Streaming Movies", ["Yes", "No", "No internet service"])
+            contract = st.selectbox("Contract", ["Month-to-month", "One year", "Two year"])
+            
+            monthly = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=100.0, value=50.0, step=5.0)
+            paperless = st.selectbox("Paperless Billing", ["Yes", "No"])
+            payment = st.selectbox("Payment Method", ["Electronic check", "Mailed check", "Bank transfer", "Credit card"])
+            
+            total_charges_est = tenure * monthly
+        
+        run_analysis = st.form_submit_button("GENERATE REPORT")
 
-with col2:
-    internet = st.selectbox("Internet Service", ["Fiber optic", "DSL", "No"])
-    online_security = st.selectbox("Online Security", ["Yes", "No", "No internet service"])
-    online_backup = st.selectbox("Online Backup", ["Yes", "No", "No internet service"])
-    device_protection = st.selectbox("Device Protection", ["Yes", "No", "No internet service"])
-    tech_support = st.selectbox("Tech Support", ["Yes", "No", "No internet service"])
-    streaming_tv = st.selectbox("Streaming TV", ["Yes", "No", "No internet service"])
-    streaming_movies = st.selectbox("Streaming Movies", ["Yes", "No", "No internet service"])
-    paperless = st.selectbox("Paperless Billing", ["Yes", "No"])
-    payment_method = st.selectbox("Payment Method", ["Electronic check", "Mailed check", "Bank transfer", "Credit card"])
+    if run_analysis:
+        with st.spinner('Analyzing Churn Probability...'):
+            time.sleep(0.5)
 
-with col3:
-    total_charges = tenure * monthly
-    st.metric("Total Charges ($)", round(total_charges, 2))
+            # --- INPUT LOGIC ---
+            input_dict = {
+                "SeniorCitizen": 1 if senior == "Yes" else 0,
+                "tenure": tenure,
+                "MonthlyCharges": monthly,
+                "TotalCharges": total_charges_est,
+                "gender_Male": 1 if gender == "Male" else 0,
+                "Partner_Yes": 1 if partner == "Yes" else 0,
+                "Dependents_Yes": 1 if dependents == "Yes" else 0,
+                "PhoneService_Yes": 1 if phone == "Yes" else 0,
+                "MultipleLines_No phone service": 1 if multiple == "No phone service" else 0,
+                "MultipleLines_Yes": 1 if multiple == "Yes" else 0,
+                "InternetService_Fiber optic": 1 if internet == "Fiber optic" else 0,
+                "InternetService_No": 1 if internet == "No" else 0,
+                "OnlineSecurity_No internet service": 1 if security == "No internet service" else 0,
+                "OnlineSecurity_Yes": 1 if security == "Yes" else 0,
+                "OnlineBackup_No internet service": 1 if backup == "No internet service" else 0,
+                "OnlineBackup_Yes": 1 if backup == "Yes" else 0,
+                "DeviceProtection_No internet service": 1 if device == "No internet service" else 0,
+                "DeviceProtection_Yes": 1 if device == "Yes" else 0,
+                "TechSupport_No internet service": 1 if tech == "No internet service" else 0,
+                "TechSupport_Yes": 1 if tech == "Yes" else 0,
+                "StreamingTV_No internet service": 1 if tv == "No internet service" else 0,
+                "StreamingTV_Yes": 1 if tv == "Yes" else 0,
+                "StreamingMovies_No internet service": 1 if movies == "No internet service" else 0,
+                "StreamingMovies_Yes": 1 if movies == "Yes" else 0,
+                "Contract_One year": 1 if contract == "One year" else 0,
+                "Contract_Two year": 1 if contract == "Two year" else 0,
+                "PaperlessBilling_Yes": 1 if paperless == "Yes" else 0,
+                "PaymentMethod_Credit card (automatic)": 1 if "Credit" in payment else 0,
+                "PaymentMethod_Electronic check": 1 if "Electronic" in payment else 0,
+                "PaymentMethod_Mailed check": 1 if "Mailed" in payment else 0
+            }
 
-# ===============================
-# PREDICTION BUTTON
-# ===============================
-if st.button("🚀 Run AI Analysis"):
+            df_final = pd.DataFrame([input_dict]).reindex(columns=ALL_FEATURES, fill_value=0)
+            proba = float(model.predict_proba(df_final)[0, 1])
+            risk = "🔴 High" if proba >= 0.7 else "🟡 Medium" if proba >= 0.4 else "🟢 Low"
 
-    # Map inputs to model features
-    input_dict = {
-        "SeniorCitizen": senior,
-        "tenure": tenure,
-        "MonthlyCharges": monthly,
-        "TotalCharges": total_charges,
-        "gender_Male": 1 if gender=="Male" else 0,
-        "Partner_Yes": 1 if partner=="Yes" else 0,
-        "Dependents_Yes": 1 if dependents=="Yes" else 0,
-        "PhoneService_Yes": 1,
-        "MultipleLines_No phone service": 0,
-        "MultipleLines_Yes": 0,
-        "InternetService_Fiber optic": 1 if internet=="Fiber optic" else 0,
-        "InternetService_No": 1 if internet=="No" else 0,
-        "OnlineSecurity_Yes": 1 if online_security=="Yes" else 0,
-        "OnlineSecurity_No internet service": 1 if online_security=="No internet service" else 0,
-        "OnlineBackup_Yes": 1 if online_backup=="Yes" else 0,
-        "OnlineBackup_No internet service": 1 if online_backup=="No internet service" else 0,
-        "DeviceProtection_Yes": 1 if device_protection=="Yes" else 0,
-        "DeviceProtection_No internet service": 1 if device_protection=="No internet service" else 0,
-        "TechSupport_Yes": 1 if tech_support=="Yes" else 0,
-        "TechSupport_No internet service": 1 if tech_support=="No internet service" else 0,
-        "StreamingTV_Yes": 1 if streaming_tv=="Yes" else 0,
-        "StreamingTV_No internet service": 1 if streaming_tv=="No internet service" else 0,
-        "StreamingMovies_Yes": 1 if streaming_movies=="Yes" else 0,
-        "StreamingMovies_No internet service": 1 if streaming_movies=="No internet service" else 0,
-        "Contract_One year": 1 if contract=="One year" else 0,
-        "Contract_Two year": 1 if contract=="Two year" else 0,
-        "PaperlessBilling_Yes": 1 if paperless=="Yes" else 0,
-        "PaymentMethod_Electronic check": 1 if payment_method=="Electronic check" else 0,
-        "PaymentMethod_Mailed check": 1 if payment_method=="Mailed check" else 0,
-        "PaymentMethod_Credit card (automatic)": 1 if payment_method=="Credit card" else 0
-    }
+            # Database Update
+            db_cursor.execute("INSERT INTO predictions (username, churn_probability, risk_level, created_at, total_charges) VALUES (?,?,?,?,?)",
+                              (st.session_state.username, proba, risk, datetime.now(), total_charges_est))
+            conn.commit()
 
-    df_final = pd.DataFrame([input_dict]).reindex(columns=ALL_FEATURES, fill_value=0)
+            # Result Display
+            st.markdown("---")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Churn Risk", f"{proba*100:.1f}%")
+            m2.metric("Assessment", risk)
+            m3.metric("Total Value", f"${total_charges_est:,.2f}")
 
-    # Predict churn probability
-    proba = model.predict_proba(df_final)[0, 1]
-    risk_level = "🔴 High Risk" if proba>=0.7 else "🟡 Medium Risk" if proba>=0.4 else "🟢 Low Risk"
+            # SHAP Visualization
+            st.subheader("🔍 AI Feature Attribution (SHAP)")
+            shap_v = explainer.shap_values(df_final)[0]
+            shap_df = pd.DataFrame({"Feature": ALL_FEATURES, "Impact Score": shap_v}).sort_values("Impact Score", ascending=False)
+            st.dataframe(shap_df.style.background_gradient(cmap="RdYlGn_r", subset=["Impact Score"]), width="stretch")
 
-    # Save prediction to DB (audit trail)
-    db_cursor.execute("""
-        INSERT INTO predictions (username, churn_probability, risk, created_at, total_charges, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (st.session_state.username, proba, risk_level, datetime.now(), total_charges, "Predicted churn"))
-    conn.commit()
+            # --- SIMULATOR WITH TWO COLUMNS RESTORED ---
+            st.subheader("🧪 Prescriptive Retention Simulator")
+            scenarios = [
+                ("15% Loyalty Discount", {"MonthlyCharges": monthly * 0.85}),
+                ("Switch to Annual Contract", {"Contract_One year": 1, "Contract_Two year": 0}),
+                ("Switch to 2-Year Contract", {"Contract_Two year": 1, "Contract_One year": 0}),
+                ("Add Tech Support Bundle", {"TechSupport_Yes": 1, "OnlineSecurity_Yes": 1}),
+                ("Upgrade to Fiber Optic", {"InternetService_Fiber optic": 1, "InternetService_No": 0}),
+                ("Downgrade to DSL (Cost Save)", {"InternetService_Fiber optic": 0, "InternetService_No": 0, "MonthlyCharges": monthly - 20}),
+                ("Modernize: Auto-Pay & Paperless", {"PaymentMethod_Credit card (automatic)": 1, "PaperlessBilling_Yes": 1}),
+                ("Full Loyalty Package", {"MonthlyCharges": monthly * 0.80, "TechSupport_Yes": 1, "Contract_One year": 1})
+            ]
+            
+            sim_list = []
+            for name, change in scenarios:
+                sim_df = df_final.copy()
+                for k, v in change.items():
+                    if k in sim_df.columns:
+                        sim_df[k] = v
+                
+                new_p = float(model.predict_proba(sim_df)[0, 1])
+                # Restore the calculation of the "Impact" column
+                reduction = (proba - new_p) * 100
+                
+                sim_list.append({
+                    "Recommended Action": name, 
+                    "Risk After Action (%)": f"{new_p*100:.1f}%", 
+                    "Potential Risk Reduction": f"{reduction:.1f}%"
+                })
+            
+            # Display sorted by lowest risk first
+            sim_results_df = pd.DataFrame(sim_list).sort_values("Risk After Action (%)")
+            st.table(sim_results_df)
 
-    # Display metrics
-    st.markdown("---")
-    col1, col2 = st.columns(2)
-    col1.metric("Churn Probability", f"{proba*100:.2f}%")
-    col2.metric("Risk Level", risk_level)
-
-    # ===============================
-    # SHAP TABLE
-    # ===============================
-    st.subheader("🔍 SHAP Feature Impact (Descending)")
-    shap_values = explainer.shap_values(df_final)[0]
-    shap_df = pd.DataFrame({
-        "Feature": ALL_FEATURES,
-        "Impact": shap_values,
-        "Your Value": df_final.iloc[0].values
-    })
-    shap_df["AbsImpact"] = shap_df["Impact"].abs()
-    shap_df = shap_df.sort_values("AbsImpact", ascending=False).drop(columns="AbsImpact")
-    st.dataframe(shap_df.style.background_gradient(cmap="RdYlGn_r", subset=["Impact"]), use_container_width=True)
-
-    # ===============================
-    # STRATEGY SIMULATOR
-    # ===============================
-    st.subheader("🧪 Retention Strategy Simulator")
-    strategies = [
-        ("10% Discount", {"MonthlyCharges": monthly*0.9}),
-        ("25% Discount", {"MonthlyCharges": monthly*0.75}),
-        ("Upgrade Contract to 1 Year", {"Contract_One year":1, "Contract_Two year":0}),
-        ("Add Online Security", {"OnlineSecurity_Yes":1}),
-        ("Add Tech Support", {"TechSupport_Yes":1}),
-        ("Discount + Security", {"MonthlyCharges":monthly*0.85, "OnlineSecurity_Yes":1})
-    ]
-
-    results = []
-    for name, change in strategies:
-        sim = df_final.copy()
-        for k,v in change.items():
-            if k in sim.columns:
-                sim[k] = v
-        new_prob = model.predict_proba(sim)[0,1]
-        results.append({
-            "Strategy": name,
-            "New Probability (%)": round(new_prob*100,2),
-            "Improvement (%)": round((proba-new_prob)*100,2)
-        })
-
-    st.table(pd.DataFrame(results).sort_values("New Probability (%)"))
-    best_action = results[0]["Strategy"]
-    st.success(f"🤖 AI Recommendation: **{best_action}**")
+with tab_history:
+    st.subheader("📋 Audit Log")
+    history_df = pd.read_sql_query(f"SELECT * FROM predictions WHERE username='{st.session_state.username}' ORDER BY created_at DESC", conn)
+    
+    if not history_df.empty:
+        history_df['churn_probability'] = pd.to_numeric(history_df['churn_probability'], errors='coerce')
+        history_df['total_charges'] = pd.to_numeric(history_df['total_charges'], errors='coerce')
+        st.dataframe(history_df, width="stretch")
+        if st.button("🗑️ Clear My History"):
+            db_cursor.execute(f"DELETE FROM predictions WHERE username='{st.session_state.username}'")
+            conn.commit()
+            st.rerun()
+    else:
+        st.info("Run an analysis to see history.")
