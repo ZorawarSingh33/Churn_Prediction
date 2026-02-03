@@ -140,7 +140,7 @@ with tab_main:
             tv = st.selectbox("Streaming TV", ["Yes", "No", "No internet service"])
             movies = st.selectbox("Streaming Movies", ["Yes", "No", "No internet service"])
             contract = st.selectbox("Contract", ["Month-to-month", "One year", "Two year"])
-            monthly = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=200.0, value=70.0, step=10.0)
+            monthly = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=100.0, value=50.0, step=5.0)
             paperless = st.selectbox("Paperless Billing", ["Yes", "No"])
             payment = st.selectbox("Payment Method", ["Electronic check", "Mailed check", "Bank transfer", "Credit card"])
             
