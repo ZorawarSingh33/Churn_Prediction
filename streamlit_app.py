@@ -38,22 +38,19 @@ def load_resources():
 model, ALL_FEATURES, explainer = load_resources()
 
 # ===============================
-# DATABASE SETUP
+# DATABASE SETUP (Predictions History)
 # ===============================
 def init_db():
+    # We still use SQLite to log predictions, but without individual users
     conn = sqlite3.connect("churn_app.db", check_same_thread=False)
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT)")
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            churn_probability REAL,
-            risk_level TEXT,
-            created_at DATETIME,
-            total_charges REAL
-        )
-    """)
+    c.execute("""CREATE TABLE IF NOT EXISTS predictions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        churn_probability REAL,
+        risk_level TEXT,
+        created_at DATETIME,
+        total_charges REAL
+    )""")
     conn.commit()
     return conn
 
@@ -61,62 +58,17 @@ conn = init_db()
 db_cursor = conn.cursor()
 
 # ===============================
-# SESSION STATE INIT
+# MAIN DASHBOARD
 # ===============================
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+st.title("📊 Customer Retention Intelligence")
+st.markdown("Immediate churn risk assessment and prescriptive analytics.")
 
-# ===============================
-# LOGIN / SIGN-UP FRONT PAGE
-# ===============================
-if not st.session_state.logged_in:
-    st.title("🛡️ ChurnAI Pro Login")
-    st.markdown("Please log in or create an account to access the retention dashboard.")
-    
-    login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
-    
-    with login_tab:
-        username = st.text_input("Username", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pass")
-        if st.button("Log In", use_container_width=True):
-            db_cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
-            if db_cursor.fetchone():
-                st.session_state.logged_in = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
-    
-    with signup_tab:
-        new_user = st.text_input("New Username", key="signup_user")
-        new_pass = st.text_input("New Password", type="password", key="signup_pass")
-        if st.button("Sign Up", use_container_width=True):
-            try:
-                db_cursor.execute("INSERT INTO users (username, password) VALUES (?,?)", (new_user, new_pass))
-                conn.commit()
-                st.success("Account created! You can now log in.")
-            except:
-                st.error("Username already exists.")
-    st.stop()  # Stop here until user logs in
-
-# ===============================
-# DASHBOARD (Visible after login)
-# ===============================
-with st.sidebar:
-    st.header("👤 Profile")
-    st.success(f"Active: **{st.session_state.username}**")
-    if st.button("Sign Out"):
-        st.session_state.logged_in = False
-        st.rerun()
-
-tab_main, tab_history = st.tabs(["🚀 Risk Predictor", "📜 History & Audit"])
+tab_main, tab_history = st.tabs(["🚀 Risk Predictor", "📜 Global History"])
 
 # ===============================
 # RISK PREDICTOR TAB
 # ===============================
 with tab_main:
-    st.title("📊 Customer Retention Intelligence")
-
     with st.form("customer_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -143,7 +95,6 @@ with tab_main:
             monthly = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=100.0, value=50.0, step=5.0)
             paperless = st.selectbox("Paperless Billing", ["Yes", "No"])
             payment = st.selectbox("Payment Method", ["Electronic check", "Mailed check", "Bank transfer", "Credit card"])
-            
             total_charges_est = tenure * monthly
 
         run_analysis = st.form_submit_button("GENERATE REPORT")
@@ -189,7 +140,6 @@ with tab_main:
             "Contract_Two year": 1 if contract=="Two year" else 0,
             "PaperlessBilling_Yes": 1 if paperless=="Yes" else 0,
         }
-
         for key in PAYMENT_MAP.values(): input_dict[key]=0
         input_dict[PAYMENT_MAP[payment]]=1
 
@@ -197,9 +147,10 @@ with tab_main:
         proba = float(model.predict_proba(df_final)[0,1])
         risk = "🔴 High" if proba>=0.7 else "🟡 Medium" if proba>=0.4 else "🟢 Low"
 
+        # Save prediction
         db_cursor.execute(
-            "INSERT INTO predictions (username, churn_probability, risk_level, created_at, total_charges) VALUES (?,?,?,?,?)",
-            (st.session_state.username, proba, risk, datetime.now(), total_charges_est)
+            "INSERT INTO predictions (churn_probability, risk_level, created_at, total_charges) VALUES (?,?,?,?)",
+            (proba, risk, datetime.now(), total_charges_est)
         )
         conn.commit()
 
@@ -215,7 +166,7 @@ with tab_main:
         shap_v = shap_values.values[0]
         shap_df = pd.DataFrame({"Feature": ALL_FEATURES, "Impact Score": shap_v})
         shap_df = shap_df.reindex(shap_df["Impact Score"].abs().sort_values(ascending=False).index)
-        st.dataframe(shap_df.style.background_gradient(cmap="RdYlGn_r", subset=["Impact Score"]), width="stretch")
+        st.dataframe(shap_df.style.background_gradient(cmap="RdYlGn_r", subset=["Impact Score"]), use_container_width=True)
 
         # SIMULATOR
         st.subheader("🧪 Prescriptive Retention Simulator")
@@ -242,23 +193,20 @@ with tab_main:
         st.table(pd.DataFrame(sim_results).sort_values("Reduction Impact", ascending=False))
 
 # ===============================
-# HISTORY / AUDIT TAB
+# HISTORY TAB
 # ===============================
 with tab_history:
     st.subheader("📋 Audit Log")
-    history_df=pd.read_sql_query(
-        "SELECT * FROM predictions WHERE username=? ORDER BY created_at DESC",
-        conn,
-        params=(st.session_state.username,)
+    history_df = pd.read_sql_query(
+        "SELECT id, churn_probability, risk_level, created_at, total_charges FROM predictions ORDER BY created_at DESC",
+        conn
     )
     if not history_df.empty:
         st.dataframe(history_df, use_container_width=True)
-        
-        # Delete button
-        if st.button("🗑️ Delete All History"):
-                db_cursor.execute("DELETE FROM predictions WHERE username=?", (st.session_state.username,))
-                conn.commit()
-                st.success("✅ Your history has been deleted.")
-                st.rerun()
+        if st.button("🗑️ Clear Global History"):
+            db_cursor.execute("DELETE FROM predictions")
+            conn.commit()
+            st.success("✅ History cleared.")
+            st.rerun()
+    else:
         st.info("No prediction history found.")
-
