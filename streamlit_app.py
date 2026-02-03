@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import joblib
 import json
 import os
-from datetime import datetime
 
 # ===============================
 # PAGE CONFIG
@@ -24,7 +22,7 @@ FEATURES_FILE = "features.json"
 @st.cache_resource
 def load_resources():
     if not os.path.exists(MODEL_FILE):
-        st.error("🚨 Model files missing!")
+        st.error("🚨 Model files missing! Ensure xgb_churn_model.pkl and features.json are in the repo.")
         st.stop()
     
     model = joblib.load(MODEL_FILE)
@@ -32,43 +30,20 @@ def load_resources():
         features = json.load(f)
     
     import shap
+    # Using TreeExplainer for XGBoost speed and stability
     explainer = shap.TreeExplainer(model)
     return model, features, explainer
 
 model, ALL_FEATURES, explainer = load_resources()
 
 # ===============================
-# DATABASE SETUP (Predictions History)
-# ===============================
-def init_db():
-    # We still use SQLite to log predictions, but without individual users
-    conn = sqlite3.connect("churn_app.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS predictions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        churn_probability REAL,
-        risk_level TEXT,
-        created_at DATETIME,
-        total_charges REAL
-    )""")
-    conn.commit()
-    return conn
-
-conn = init_db()
-db_cursor = conn.cursor()
-
-# ===============================
-# MAIN DASHBOARD
+# MAIN DASHBOARD UI
 # ===============================
 st.title("📊 Customer Retention Intelligence")
 st.markdown("Immediate churn risk assessment and prescriptive analytics.")
 
-tab_main, tab_history = st.tabs(["🚀 Risk Predictor", "📜 Global History"])
-
-# ===============================
-# RISK PREDICTOR TAB
-# ===============================
-with tab_main:
+# Single container for the main app logic
+with st.container():
     with st.form("customer_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -77,7 +52,7 @@ with tab_main:
             senior = st.selectbox("Senior Citizen", ["No", "Yes"])
             partner = st.selectbox("Partner", ["Yes", "No"])
             dependents = st.selectbox("Dependents", ["Yes", "No"])
-            tenure = st.slider("Tenure (Months)", 0, 72, 12)
+            tenure = st.slider("Tenure (Months)", 0, 72, 5)
         with c2:
             st.subheader("🔌 Services")
             phone = st.selectbox("Phone Service", ["Yes", "No"])
@@ -97,9 +72,10 @@ with tab_main:
             payment = st.selectbox("Payment Method", ["Electronic check", "Mailed check", "Bank transfer", "Credit card"])
             total_charges_est = tenure * monthly
 
-        run_analysis = st.form_submit_button("GENERATE REPORT")
+        run_analysis = st.form_submit_button("Analyze Report")
 
     if run_analysis:
+        # Mapping for the model features
         PAYMENT_MAP = {
             "Electronic check": "PaymentMethod_Electronic check",
             "Mailed check": "PaymentMethod_Mailed check",
@@ -107,6 +83,7 @@ with tab_main:
             "Credit card": "PaymentMethod_Credit card (automatic)"
         }
 
+        # Construct Input Dictionary (matching Telco Dataset structure)
         input_dict = {
             "SeniorCitizen": 1 if senior=="Yes" else 0,
             "tenure": tenure,
@@ -140,73 +117,76 @@ with tab_main:
             "Contract_Two year": 1 if contract=="Two year" else 0,
             "PaperlessBilling_Yes": 1 if paperless=="Yes" else 0,
         }
+        
+        # Apply payment mapping
         for key in PAYMENT_MAP.values(): input_dict[key]=0
         input_dict[PAYMENT_MAP[payment]]=1
 
+        # Transform to DataFrame
         df_final = pd.DataFrame([input_dict]).reindex(columns=ALL_FEATURES, fill_value=0)
+        
+        # Prediction
         proba = float(model.predict_proba(df_final)[0,1])
-        risk = "🔴 High" if proba>=0.7 else "🟡 Medium" if proba>=0.4 else "🟢 Low"
+        risk = "🔴 High" if proba >= 0.7 else "🟡 Medium" if proba >= 0.4 else "🟢 Low"
 
-        # Save prediction
-        db_cursor.execute(
-            "INSERT INTO predictions (churn_probability, risk_level, created_at, total_charges) VALUES (?,?,?,?)",
-            (proba, risk, datetime.now(), total_charges_est)
-        )
-        conn.commit()
-
+        # RESULTS SECTION
         st.markdown("---")
         m1, m2, m3 = st.columns(3)
         m1.metric("Churn Risk", f"{proba*100:.1f}%")
         m2.metric("Assessment", risk)
         m3.metric("Projected Value", f"${total_charges_est:,.2f}")
 
-        # SHAP
-        st.subheader("🔍 AI Feature Attribution (SHAP)")
+        # SHAP EXPLANATION (Absolute Magnitude Ranking)
+        st.subheader(" AI Feature Attribution (SHAP)")
         shap_values = explainer(df_final)
         shap_v = shap_values.values[0]
         shap_df = pd.DataFrame({"Feature": ALL_FEATURES, "Impact Score": shap_v})
         shap_df = shap_df.reindex(shap_df["Impact Score"].abs().sort_values(ascending=False).index)
-        st.dataframe(shap_df.style.background_gradient(cmap="RdYlGn_r", subset=["Impact Score"]), use_container_width=True)
+        
+        st.dataframe(
+            shap_df.style.background_gradient(cmap="RdYlGn_r", subset=["Impact Score"]), 
+            use_container_width=True
+        )
 
-        # SIMULATOR
-        st.subheader("🧪 Prescriptive Retention Simulator")
+        # RETENTION SIMULATOR
+        st.subheader(" Prescriptive Retention Simulator")
         scenarios = [
             ("Switch to 2-Year Contract", {"Contract_Two year":1, "Contract_Month-to-month":0}),
             ("Switch to Annual Contract", {"Contract_One year":1, "Contract_Month-to-month":0}),
             ("Auto-pay (Credit Card)", {"PaymentMethod_Credit card (automatic)":1, "PaymentMethod_Electronic check":0}),
             ("Apply 15% Loyalty Discount", {"MonthlyCharges": monthly*0.85}),
-            ("Downgrade Fiber to DSL", {"InternetService_Fiber optic":0, "InternetService_DSL":1, "InternetService_No":0, "MonthlyCharges":max(20, monthly-20)}),
-            ("Full Strategy: 2yr + Auto-Pay + 20% Discount", {"Contract_Two year":1, "Contract_Month-to-month":0, "PaymentMethod_Credit card (automatic)":1, "MonthlyCharges":monthly*0.8})
+            ("Downgrade Fiber to DSL", {
+                "InternetService_Fiber optic":0, 
+                "InternetService_DSL":1, 
+                "InternetService_No":0, 
+                "MonthlyCharges":max(20, monthly-20)
+            }),
+            ("Full Strategy: 2yr + Auto-Pay + 20% Discount", {
+                "Contract_Two year":1, 
+                "Contract_Month-to-month":0, 
+                "PaymentMethod_Credit card (automatic)":1, 
+                "MonthlyCharges":monthly*0.8
+            })
         ]
-        sim_results=[]
+        
+        sim_results = []
         for name, changes in scenarios:
             sim_df = df_final.copy()
-            sim_df[[c for c in sim_df.columns if c.startswith("Contract_")]]=0
-            sim_df[[c for c in sim_df.columns if c.startswith("PaymentMethod_")]]=0
-            sim_df[[c for c in sim_df.columns if c.startswith("InternetService_")]]=0
-            for col,val in changes.items():
-                if col in sim_df.columns: sim_df[col]=val
-            sim_df["TotalCharges"]=tenure*sim_df["MonthlyCharges"].values[0]
-            new_p=float(model.predict_proba(sim_df)[0,1])
-            reduction=max(0,(proba-new_p)*100)
-            sim_results.append({"Action":name,"New Risk (%)":f"{new_p*100:.1f}%","Reduction Impact":f"{reduction:.1f}%"})
+            # Reset groups to ensure mutual exclusivity
+            sim_df[[c for c in sim_df.columns if c.startswith("Contract_")]] = 0
+            sim_df[[c for c in sim_df.columns if c.startswith("PaymentMethod_")]] = 0
+            sim_df[[c for c in sim_df.columns if c.startswith("InternetService_")]] = 0
+            
+            for col, val in changes.items():
+                if col in sim_df.columns: sim_df[col] = val
+            
+            sim_df["TotalCharges"] = tenure * sim_df["MonthlyCharges"].values[0]
+            new_p = float(model.predict_proba(sim_df)[0,1])
+            reduction = max(0, (proba - new_p) * 100)
+            sim_results.append({
+                "Action": name, 
+                "New Risk (%)": f"{new_p*100:.1f}%", 
+                "Reduction Impact": f"{reduction:.1f}%"
+            })
+        
         st.table(pd.DataFrame(sim_results).sort_values("Reduction Impact", ascending=False))
-
-# ===============================
-# HISTORY TAB
-# ===============================
-with tab_history:
-    st.subheader("📋 Audit Log")
-    history_df = pd.read_sql_query(
-        "SELECT id, churn_probability, risk_level, created_at, total_charges FROM predictions ORDER BY created_at DESC",
-        conn
-    )
-    if not history_df.empty:
-        st.dataframe(history_df, use_container_width=True)
-        if st.button("🗑️ Clear Global History"):
-            db_cursor.execute("DELETE FROM predictions")
-            conn.commit()
-            st.success("✅ History cleared.")
-            st.rerun()
-    else:
-        st.info("No prediction history found.")
